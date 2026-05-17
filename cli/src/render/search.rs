@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use elasticlunr::{Index, IndexBuilder};
 use reflexo_typst::{error::prelude::*, path::unix_slash};
@@ -22,9 +22,13 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Stores [`SearchItem`]s keyed by chapter URL so that `serve` can re-index
+/// only the chapters it recompiled (replace-by-key) and still emit a full
+/// index from the merged set. The elasticlunr [`Index`] is append-only, so
+/// it's rebuilt fresh from `items` each time [`render_search_index`] is
+/// called rather than kept as long-lived mutable state.
 pub struct SearchRenderer {
-    index: Index,
-    doc_urls: Vec<String>,
+    items: BTreeMap<String, SearchItem>,
     pub config: Search,
 }
 
@@ -36,59 +40,52 @@ impl Default for SearchRenderer {
 
 impl SearchRenderer {
     pub fn new() -> Self {
-        let index = IndexBuilder::new()
-            .add_field_with_tokenizer("title", Box::new(&tokenize))
-            .add_field_with_tokenizer("body", Box::new(&tokenize))
-            .add_field_with_tokenizer("breadcrumbs", Box::new(&tokenize))
-            .build();
-
         SearchRenderer {
-            index,
-            doc_urls: vec![],
+            items: BTreeMap::new(),
             config: Search::default(),
         }
     }
 
-    /// Uses the given arguments to construct a search document, then inserts it
-    /// to the given index.
-    fn add_doc(&mut self, anchor_base: &str, section_id: &Option<String>, items: &[&str]) {
-        let url = if let Some(ref id) = *section_id {
-            Cow::Owned(format!("{anchor_base}#{id}"))
-        } else {
-            Cow::Borrowed(anchor_base)
-        };
-        let doc_ref = self.doc_urls.len().to_string();
-        self.doc_urls.push(url.into());
-
-        let items = items.iter().map(|&x| collapse_whitespace(x.trim()));
-        self.index.add_doc(&doc_ref, items);
-    }
-
-    pub fn render_search_index(&mut self, dest_dir: &Path) -> Result<()> {
-        let index = write_to_json(&self.index, &self.config, &self.doc_urls)?;
-        if index.len() > 10_000_000 {
-            log::warn!("searchindex.json is very large ({} bytes)", index.len());
-        }
-
-        write_file(dest_dir.join("searchindex.json"), index.as_bytes())?;
-        write_file(
-            dest_dir.join("searchindex.js"),
-            format!("Object.assign(window.search, {index});").as_bytes(),
-        )?;
-
-        Ok(())
-    }
-
-    pub fn build(&mut self, items: &[SearchItem]) -> Result<()> {
+    /// Insert or replace the entry for each item's chapter URL.
+    pub fn merge(&mut self, items: Vec<SearchItem>) {
         for item in items {
+            self.items.insert(item.anchor_base.clone(), item);
+        }
+    }
+
+    pub fn render_search_index(&self, dest_dir: &Path) -> Result<()> {
+        let mut index = IndexBuilder::new()
+            .add_field_with_tokenizer("title", Box::new(&tokenize))
+            .add_field_with_tokenizer("body", Box::new(&tokenize))
+            .add_field_with_tokenizer("breadcrumbs", Box::new(&tokenize))
+            .build();
+        let mut doc_urls: Vec<String> = Vec::with_capacity(self.items.len());
+
+        for item in self.items.values() {
+            let doc_ref = doc_urls.len().to_string();
+            doc_urls.push(item.anchor_base.clone());
+
             let title = item.title.as_str();
             let desc = item.desc.as_deref().unwrap_or("");
-            let dest = item.anchor_base.as_str();
-
             // , &breadcrumbs.join(" » ")
             // todo: currently, breadcrumbs is title it self
-            self.add_doc(dest, &None, &[title, desc, title]);
+            let fields = [title, desc, title];
+            index.add_doc(
+                &doc_ref,
+                fields.iter().map(|&x| collapse_whitespace(x.trim())),
+            );
         }
+
+        let json = write_to_json(&index, &self.config, &doc_urls)?;
+        if json.len() > 10_000_000 {
+            log::warn!("searchindex.json is very large ({} bytes)", json.len());
+        }
+
+        write_file(dest_dir.join("searchindex.json"), json.as_bytes())?;
+        write_file(
+            dest_dir.join("searchindex.js"),
+            format!("Object.assign(window.search, {json});").as_bytes(),
+        )?;
 
         Ok(())
     }

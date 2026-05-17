@@ -90,8 +90,16 @@ impl Project {
     }
 
     pub fn build(&mut self) -> Result<()> {
-        let sr = SearchRenderer::new();
-        self.extract_assets(&sr)?;
+        let mut sr = SearchRenderer::new();
+        self.build_into(&mut sr)
+    }
+
+    /// Full build using an externally-owned [`SearchRenderer`]. The watch
+    /// loop owns one renderer for the session so incremental recompiles can
+    /// replace entries by chapter path instead of overwriting the full index
+    /// with a partial one.
+    pub fn build_into(&mut self, sr: &mut SearchRenderer) -> Result<()> {
+        self.extract_assets(sr)?;
         self.compile_once(&Default::default(), sr)?;
 
         Ok(())

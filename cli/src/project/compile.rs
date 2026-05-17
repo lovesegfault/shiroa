@@ -24,7 +24,7 @@ impl Project {
     pub(super) fn compile_once(
         &mut self,
         ac: &BTreeMap<ImmutStr, usize>,
-        mut sr: SearchRenderer,
+        sr: &mut SearchRenderer,
     ) -> Result<()> {
         self.prepare_chapters();
 
@@ -43,7 +43,10 @@ impl Project {
             |path| self.compile_chapter(path),
         )?;
 
-        sr.build(&serach_ctx.items.into_inner().unwrap())?;
+        // Replace entries for the (possibly filtered) chapters that were
+        // actually rendered; chapters skipped by `ac` keep their existing
+        // entries in `sr`, so the index stays full across `serve` increments.
+        sr.merge(serach_ctx.items.into_inner().unwrap());
 
         if sr.config.copy_js {
             sr.render_search_index(&self.dest_dir)?;

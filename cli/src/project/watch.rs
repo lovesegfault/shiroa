@@ -17,7 +17,14 @@ impl Project {
         tx: broadcast::Sender<WatchSignal>,
         addr: Option<SocketAddr>,
     ) {
-        let _ = self.build();
+        // One renderer for the whole session: cold-start populates every
+        // chapter, the loop's filtered recompiles replace per-chapter
+        // entries via `SearchRenderer::merge`, and the index is rewritten
+        // from the merged set each iteration. Chapter removal isn't handled
+        // — a deleted chapter's entry stays until restart (book.typ edits
+        // are rare during a serve session).
+        let mut sr = SearchRenderer::new();
+        let _ = self.build_into(&mut sr);
         let (dep_tx, dep_rx) = mpsc::unbounded_channel();
         let (fs_tx, mut fs_rx) = mpsc::unbounded_channel();
         tokio::spawn(watch_deps(dep_rx, move |event| {
@@ -137,7 +144,7 @@ impl Project {
             }
 
             // todo: blocking?
-            let _ = self.compile_once(&active_files, SearchRenderer::new());
+            let _ = self.compile_once(&active_files, &mut sr);
 
             if !is_heartbeat {
                 let _ = tx.send(WatchSignal::Reload);
